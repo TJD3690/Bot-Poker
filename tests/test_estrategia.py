@@ -43,7 +43,7 @@ def test_apertura_premium_monto_total():
 def test_preflop_abierto_por_otro_no_usar_tabla_apertura():
     e=estado(historia=[{'id_jugador':'p4','etapa':'preflop','accion':{'tipo':'raise','monto':300}}],apuesta=300)
     a=decidir(e,[c(14,1),c(14,3)],'p3',['fold','call','raise','allin'],random.Random(3))
-    assert a == {'tipo':'fold'}
+    assert a == {'tipo':'raise','monto':900}
 
 
 def test_check_bb_gratis():

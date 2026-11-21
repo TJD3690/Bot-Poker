@@ -12,7 +12,7 @@ import random
 RANGOS = json.loads(Path(__file__).with_name('rangos.json').read_text(encoding='utf-8'))['tablas']
 ORDEN = 'AKQJT98765432'
 FRECUENCIAS = {'UTG': .40, 'HJ': .45, 'CO': .50, 'BTN': .55, 'SB': .35, 'BB': .40}
-
+PROB_MIN, PROB_MAX = .20, .70
 
 def clase_mano(cartas):
     """De 2 cartas a AA, AKs, AKo, etc., sin importar el orden de entrada."""
@@ -92,72 +92,153 @@ def intentar_subir(estado, yo, validas, objetivo):
     return {'tipo': tipo, 'monto': objetivo}
 
 
-def preflop(estado, yo, cartas, validas, rng, id_jugador):
-    p = posicion(estado, id_jugador)
-    if p is None:
-        return accion_segura(validas)
-    hist = [a for a in estado.get('historial_acciones', []) if a.get('etapa') == 'preflop']
-    propias = [a for a in hist if a.get('id_jugador') == id_jugador]
-    apertura_propia = next((a for a in propias if a.get('accion', {}).get('tipo') == 'raise'), None)
-    ajenas = [a for a in hist if a.get('id_jugador') != id_jugador and a.get('accion', {}).get('tipo') in ('call', 'bet', 'raise', 'allin')]
-    bb = max(1, int(estado.get('ciega_grande') or 100))
-    saldo_bb = int(yo.get('saldo', 0)) / bb
-    carta = clase_mano(cartas)
+def grupo_preflop(carta):
+    """Grupo A-E de PREFLOT (sección 5.2) para una clase de mano como 'AKs'."""
+    if carta in ('AA', 'KK'):
+        return 'A'
+    if carta in ('QQ', 'AKs', 'AKo'):
+        return 'B'
+    if carta in ('JJ', 'TT', 'AQs', 'AJs', 'KQs'):
+        return 'C'
+    if carta in ('99', '88', '77', '66', 'ATs', 'KJs', 'QJs', 'JTs', 'T9s', '98s', 'AJo', 'KQo'):
+        return 'D'
+    return 'E'
 
-    # Después de nuestra apertura, una subida ajena activa defensa contra 3-bet.
-    if apertura_propia and 'call' in validas:
-        apuesta_anterior = int(apertura_propia['accion'].get('monto') or 0)
-        rival = int(estado.get('apuesta_actual', 0))
-        relacion = rival / max(1, apuesta_anterior)
-        grupo = 'A' if carta in ('AA', 'KK') else ('B' if carta in ('QQ', 'AKs', 'AKo') else (
-            'C' if carta in ('JJ', 'TT', 'AQs', 'AJs', 'KQs') else (
-            'D' if carta in ('99', '88', '77', '66', 'ATs', 'KJs', 'QJs', 'JTs', 'T9s', '98s', 'AJo', 'KQo') else 'E')))
-        allin_ajeno = any(a['accion'].get('tipo') == 'allin' for a in ajenas)
-        n_activos = sum(bool(j.get('en_mano') and j.get('activo')) for j in estado.get('jugadores', []))
-        headsup = n_activos == 2
-        efectivos = min(int(yo.get('saldo', 0)) + int(yo.get('apuesta_ronda', 0)),
-                        max((int(j.get('saldo', 0)) + int(j.get('apuesta_ronda', 0)) for j in estado.get('jugadores', []) if j.get('id') != id_jugador and j.get('activo')), default=0)) / bb
-        if grupo == 'A':
-            if allin_ajeno:
-                return {'tipo': 'call'}
-            return intentar_subir(estado, yo, validas, rival * 2.5) or {'tipo': 'call'}
-        if grupo == 'B':
-            if allin_ajeno:
-                return {'tipo': 'call'} if headsup and rival <= 20 * bb else accion_segura(validas)
-            if relacion <= 2.5:
-                return intentar_subir(estado, yo, validas, rival * 2.5) or {'tipo': 'call'}
-            if relacion <= 4 or (headsup and rival <= 15 * bb):
-                return {'tipo': 'call'}
-        if grupo == 'C':
-            if allin_ajeno:
-                return {'tipo': 'call'} if headsup and rival <= 10 * bb else accion_segura(validas)
-            if relacion <= 2.5 or (relacion <= 4 and headsup and rival <= 12 * bb and efectivos >= 40):
-                return {'tipo': 'call'}
-        if grupo == 'D' and not allin_ajeno and relacion <= 2.5 and p in ('CO','BTN','BB') and headsup and efectivos >= 40:
-            return {'tipo': 'call'}
-        return accion_segura(validas)
 
-    # Si otro jugador ya entró voluntariamente, falta definir defensa ante apertura ajena.
-    if ajenas:
+def prob_apertura(pos, saldo_bb):
+    """P = limitar(P0(pos) + ajuste_fichas, 20 %, 70 %) de PREFLOT (sección 3.2)."""
+    base = FRECUENCIAS[pos] - (.10 if saldo_bb <= 40 else 0)
+    return min(PROB_MAX, max(PROB_MIN, base))
+
+
+def tamano_por_relacion(r):
+    """Tras nuestra apertura: R = apuesta rival / nuestra apertura (PREFLOT 5.1)."""
+    return 'pequena' if r <= 2.5 else ('mediana' if r <= 4 else 'grande')
+
+
+def tamano_por_bb(apuesta_en_bb):
+    """Apertura ajena: se mide la apuesta rival en ciegas grandes."""
+    return 'pequena' if apuesta_en_bb <= 3 else ('mediana' if apuesta_en_bb <= 5 else 'grande')
+
+
+def pagar(validas):
+    return {'tipo': 'call'} if 'call' in validas else accion_segura(validas)
+
+
+def responder_subida(estado, yo, validas, grupo, tamano, factor, pos, allin_ajeno, headsup, efectivos, rival, bb):
+    """Tabla 5.3 de PREFLOT. factor = multiplicador de la 4-bet (2.5) o de la subida ante apertura ajena (3)."""
+    if grupo == 'A':
+        if allin_ajeno:
+            return pagar(validas)
+        return intentar_subir(estado, yo, validas, rival * factor) or pagar(validas)
+    if grupo == 'B':
+        if allin_ajeno:
+            return pagar(validas) if headsup and rival <= 20 * bb else accion_segura(validas)
+        if tamano == 'pequena':
+            return intentar_subir(estado, yo, validas, rival * factor) or pagar(validas)
+        if tamano == 'mediana' or (headsup and rival <= 15 * bb):
+            return pagar(validas)
+    if grupo == 'C':
+        if allin_ajeno:
+            return pagar(validas) if headsup and rival <= 10 * bb else accion_segura(validas)
+        if tamano == 'pequena' or (tamano == 'mediana' and headsup and rival <= 12 * bb and efectivos >= 40):
+            return pagar(validas)
+    if grupo == 'D' and not allin_ajeno and tamano == 'pequena' and pos in ('CO', 'BTN', 'BB') \
+            and headsup and efectivos >= 40:
+        return pagar(validas)
+    return accion_segura(validas)
+
+
+def corto_sin_subida(validas, grupo, color):
+    """Stack de 20 BB o menos y nadie ha subido: all-in con A, B, C o mano verde."""
+    if (grupo in ('A', 'B', 'C') or color == 'G') and 'allin' in validas:
+        return {'tipo': 'allin'}
+    return accion_segura(validas)
+
+
+def corto_ante_subida(validas, grupo, allin_ajeno, headsup, rival, bb):
+    """Stack de 20 BB o menos ante una subida ajena."""
+    if allin_ajeno:
+        if grupo in ('A', 'B') or (grupo == 'C' and headsup and rival <= 10 * bb):
+            return pagar(validas)
         return accion_segura(validas)
-    if p == 'BB' and 'check' in validas:
-        return {'tipo': 'check'}
-    if saldo_bb <= 20:  # Política de stack corto aún no aprobada.
-        return accion_segura(validas)
-    color = rango_color(p, cartas)
+    if grupo in ('A', 'B', 'C') and 'allin' in validas:
+        return {'tipo': 'allin'}
+    return accion_segura(validas)
+
+
+def abrir_o_aislar(estado, yo, validas, rng, pos, color, saldo_bb, bb, limpers):
+    """Apertura (limpers = 0) o aislamiento de limpers (3 BB + 1 BB por limper)."""
     if color == 'F':
         return accion_segura(validas)
-    prob = 1.0 if color == 'G' else FRECUENCIAS[p] - (.10 if saldo_bb <= 40 else 0)
+    prob = 1.0 if color == 'G' else prob_apertura(pos, saldo_bb)
     if rng.random() > prob:
         return accion_segura(validas)
+    if limpers:
+        return intentar_subir(estado, yo, validas, (3 + limpers) * bb) or accion_segura(validas)
     opciones = {'UTG': ((2, .5), (2.5, .5)), 'HJ': ((2, .5), (2.5, .5)),
                 'CO': ((2, .4), (2.5, .6)), 'BTN': ((2, .5), (2.5, .5)),
-                'SB': ((2.5, .5), (3, .5))}.get(p)
+                'SB': ((2.5, .5), (3, .5))}.get(pos)
     if opciones is None:
         return accion_segura(validas)
     multiplicador = opciones[0][0] if rng.random() < opciones[0][1] else opciones[1][0]
     return intentar_subir(estado, yo, validas, multiplicador * bb) or accion_segura(validas)
 
+
+def preflop(estado, yo, cartas, validas, rng, id_jugador):
+    pos = posicion(estado, id_jugador)
+    if pos is None:
+        return accion_segura(validas)
+    hist = [a for a in estado.get('historial_acciones', []) if a.get('etapa') == 'preflop']
+    propias = [a for a in hist if a.get('id_jugador') == id_jugador]
+    apertura_propia = next((a for a in propias if a.get('accion', {}).get('tipo') == 'raise'), None)
+    ajenas = [a for a in hist if a.get('id_jugador') != id_jugador
+              and a.get('accion', {}).get('tipo') in ('call', 'bet', 'raise', 'allin')]
+    subidas = [a for a in ajenas if a['accion'].get('tipo') in ('bet', 'raise', 'allin')]
+    limpers = {a.get('id_jugador') for a in ajenas if a['accion'].get('tipo') == 'call'}
+    allin_ajeno = any(a['accion'].get('tipo') == 'allin' for a in ajenas)
+    bb = max(1, int(estado.get('ciega_grande') or 100))
+    saldo_bb = (int(yo.get('saldo', 0)) + int(yo.get('apuesta_ronda', 0))) / bb
+    carta = clase_mano(cartas)
+    grupo = grupo_preflop(carta)
+    color = rango_color(pos, cartas)
+    rival = int(estado.get('apuesta_actual', 0))
+    n_activos = sum(bool(j.get('en_mano') and j.get('activo')) for j in estado.get('jugadores', []))
+    headsup = n_activos == 2
+    efectivos = min(int(yo.get('saldo', 0)) + int(yo.get('apuesta_ronda', 0)),
+                    max((int(j.get('saldo', 0)) + int(j.get('apuesta_ronda', 0))
+                         for j in estado.get('jugadores', [])
+                         if j.get('id') != id_jugador and j.get('activo')), default=0)) / bb
+
+    # Varias subidas ajenas: solo continúan A y B.
+    if len(subidas) >= 2 and grupo not in ('A', 'B'):
+        return accion_segura(validas)
+
+    # 1) Defensa tras nuestra apertura.
+    if apertura_propia and 'call' in validas:
+        previa = int(apertura_propia['accion'].get('monto') or 0)
+        tamano = tamano_por_relacion(rival / max(1, previa))
+        return responder_subida(estado, yo, validas, grupo, tamano, 2.5, pos, allin_ajeno, headsup, efectivos, rival, bb)
+    if apertura_propia:
+        return accion_segura(validas)
+
+    # 2) Apertura ajena antes de nuestra primera acción.
+    if subidas:
+        if saldo_bb <= 20:
+            return corto_ante_subida(validas, grupo, allin_ajeno, headsup, rival, bb)
+        return responder_subida(estado, yo, validas, grupo, tamano_por_bb(rival / bb), 3, pos,
+                                allin_ajeno, headsup, efectivos, rival, bb)
+
+    # 3) Ciega grande con check gratis.
+    if pos == 'BB' and 'check' in validas:
+        return {'tipo': 'check'}
+
+    # 4) Stack corto sin subidas.
+    if saldo_bb <= 20:
+        return corto_sin_subida(validas, grupo, color)
+
+    # 5) Limpers (aislar) o apertura normal.
+    return abrir_o_aislar(estado, yo, validas, rng, pos, color, saldo_bb, bb, len(limpers))
 
 def evaluar_cinco(cartas):
     """Retorna (categoría 0-8, desempates) para exactamente cinco cartas."""
