@@ -9,10 +9,13 @@ import json
 from pathlib import Path
 import random
 
+from mesa import proyectos
+
 RANGOS = json.loads(Path(__file__).with_name('rangos.json').read_text(encoding='utf-8'))['tablas']
 ORDEN = 'AKQJT98765432'
 FRECUENCIAS = {'UTG': .40, 'HJ': .45, 'CO': .50, 'BTN': .55, 'SB': .35, 'BB': .40}
 PROB_MIN, PROB_MAX = .20, .70
+MARGEN_PROYECTO = .05   # PROVISIONAL: colchón al pagar un proyecto con apuesta pendiente
 
 def clase_mano(cartas):
     """De 2 cartas a AA, AKs, AKo, etc., sin importar el orden de entrada."""
@@ -282,6 +285,8 @@ def grupo_flop(cartas, mesa):
     score = evaluar(cartas + mesa[:3])[0]
     if score >= 6:
         return 'A1'
+    if score == 3 and len({c['rango'] for c in mesa[:3]}) == 1:
+        return 'E'   # el trío está en la mesa y no es nuestro
     if score >= 3:
         return 'A2'
     if score == 2:
@@ -355,6 +360,11 @@ def flop(estado, yo, cartas, validas, rng):
     elif grupo == 'C':
         if R <= .33 and seco and 'call' in validas:
             return {'tipo':'call'}
+    # Proyecto (color/escalera): pagar si la probabilidad de completar supera el precio del pozo.
+    proyecto = proyectos(cartas, mesa)
+    if proyecto['outs'] and 'call' in validas:
+        if proyecto['prob'] >= pago / (pot + pago) + MARGEN_PROYECTO:
+            return {'tipo': 'call'}
     return accion_segura(validas)
 
 
