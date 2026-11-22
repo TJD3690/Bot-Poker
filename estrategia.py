@@ -362,6 +362,10 @@ def decidir(estado, cartas, id_jugador, validas, rng=None):
     """Devuelve dict acción; sin efectos laterales. TURN/RIVER siguen provisionales."""
     rng = rng or random.Random()
     validas = list(validas or [])
+    estado = dict(estado)
+    for campo in ('historial_acciones', 'comunitarias', 'jugadores'):
+        if estado.get(campo) is None:   # la arena manda null cuando no hay datos
+            estado[campo] = []
     yo = obtener_yo(estado, id_jugador)
     if yo is None or len(cartas) != 2:
         return accion_segura(validas)

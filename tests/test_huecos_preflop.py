@@ -112,3 +112,13 @@ def test_nunca_accion_ilegal():
                     if a['tipo'] in ('bet', 'raise'):
                         yo = next(j for j in e['jugadores'] if j['id'] == pid)
                         assert ap + 100 <= a['monto'] <= yo['saldo'] + yo['apuesta_ronda']
+
+
+def test_historial_null_no_rompe_y_abre():
+    """La arena manda historial_acciones = null cuando nadie ha actuado: debe abrir, no caer al respaldo."""
+    e = estado()
+    e['historial_acciones'] = None
+    e['comunitarias'] = None
+    a = decidir(e, [c(14, 1), c(14, 3)], 'p3', VALIDAS, random.Random(1))
+    assert a['tipo'] == 'raise'
+    assert e['historial_acciones'] is None   # no modifica el estado original
